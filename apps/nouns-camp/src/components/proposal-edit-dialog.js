@@ -35,6 +35,10 @@ import { useUpdateProposal } from "../hooks/dao-contract.js";
 import { useCreateProposalCandidate } from "../hooks/data-contract.js";
 import DiffBlock from "./diff-block.js";
 import ProposalEditor from "./proposal-editor.js";
+import {
+  useCollection as useDrafts,
+  useSingleItem as useDraft,
+} from "../hooks/drafts.js";
 
 export const createMarkdownDescription = ({ title, body }) => {
   const markdownBody = messageUtils.toMarkdown(richTextToMessageBlocks(body));
@@ -67,59 +71,82 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
     [proposal],
   );
 
+  const draftId = `proposal:${proposalId}`;
+
+  const { createItem: createDraft, deleteItem: deleteDraft } = useDrafts();
+  const [
+    draft,
+    {
+      setName: setDraftTitle,
+      setBody: setDraftBody,
+      setActions: setDraftActions,
+    },
+  ] = useDraft(draftId);
+
   const [showPreviewDialog, setShowPreviewDialog] = React.useState(false);
   const [showSubmitDialog, setShowSubmitDialog] = React.useState(false);
 
-  const [title, setTitle] = React.useState(persistedTitle);
-  const [body, setBody] = React.useState(persistedRichTextBody);
-  const [actions, setActions] = React.useState(persistedActions);
-
   const [hasPendingSubmit, setPendingSubmit] = React.useState(false);
+  const [hasPendingDismiss, setPendingDismiss] = React.useState(false);
 
-  const deferredBody = React.useDeferredValue(body);
+  const deferredBody = React.useDeferredValue(
+    draft?.body ?? persistedRichTextBody,
+  );
 
-  const hasTitleChanges = title.trim() !== persistedTitle;
+  const hasTitleChanges = React.useMemo(() => {
+    if (!draft) return;
+    return draft?.name.trim() !== persistedTitle;
+  }, [draft, persistedTitle]);
 
   const hasBodyChanges = React.useMemo(() => {
+    if (!draft) return;
     const markdownBody = messageUtils.toMarkdown(
       richTextToMessageBlocks(deferredBody),
     );
     return markdownBody !== persistedMarkdownBody;
-  }, [deferredBody, persistedMarkdownBody]);
+  }, [draft, deferredBody, persistedMarkdownBody]);
 
-  const hasActionChanges =
-    actions.length !== persistedActions.length ||
-    actions.some((a, i) => {
-      const persistedAction = persistedActions[i];
+  const hasActionChanges = React.useMemo(() => {
+    if (!draft) return;
 
-      const transactions = unparseTransactions(resolveActionTransactions(a));
-      const persistedTransactions = unparseTransactions(
-        resolveActionTransactions(persistedAction),
-      );
+    return (
+      draft.actions.length !== persistedActions.length ||
+      draft.actions.some((a, i) => {
+        const persistedAction = persistedActions[i];
 
-      return !areTransactionsEqual(transactions, persistedTransactions);
-    });
+        const transactions = unparseTransactions(resolveActionTransactions(a));
+        const persistedTransactions = unparseTransactions(
+          resolveActionTransactions(persistedAction),
+        );
+
+        return !areTransactionsEqual(transactions, persistedTransactions);
+      })
+    );
+  }, [draft, persistedActions]);
 
   const hasChanges = hasTitleChanges || hasBodyChanges || hasActionChanges;
 
   const createDescriptionDiff = () =>
     diffParagraphs(
       proposal.description,
-      createMarkdownDescription({ title, body: deferredBody }),
+      createMarkdownDescription({ title: draft.name, body: deferredBody }),
     );
   const createTransactionsDiff = () =>
     diffParagraphs(
       (proposal.transactions ?? [])
         .map((t) => stringifyTransaction(t))
         .join("\n\n"),
-      actions
+      draft.actions
         .flatMap((a) => resolveActionTransactions(a))
         .map((t) => stringifyTransaction(t))
         .join("\n\n"),
     );
 
   const dismissDialog = () => {
+    setPendingDismiss(true);
+
     if (!hasChanges) {
+      deleteDraft(draftId);
       closeDialog();
       return;
     }
@@ -128,9 +155,12 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
       !confirm(
         "This will discard all your changes. Are you sure you wish to continue?",
       )
-    )
+    ) {
+      setPendingDismiss(false);
       return;
+    }
 
+    deleteDraft(draftId);
     closeDialog();
   };
 
@@ -166,7 +196,7 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
   const submit = async ({ updateMessage } = {}) => {
     const buildUpdateCandidateSlug = () => {
       const slugifiedTitle =
-        title.toLowerCase().replace(/\s+/g, "-") + "-update";
+        draft.name.toLowerCase().replace(/\s+/g, "-") + "-update";
       let index = 0;
       while (slugifiedTitle) {
         const slug = [slugifiedTitle, index].filter(Boolean).join("-");
@@ -178,12 +208,12 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
 
     const getDescriptionIfChanged = () => {
       if (!hasTitleChanges && !hasBodyChanges) return null;
-      return createMarkdownDescription({ title, body });
+      return createMarkdownDescription({ title: draft.name, body: draft.body });
     };
 
     const getTransactionsIfChanged = () => {
       if (!hasActionChanges) return null;
-      return actions.flatMap((a) => resolveActionTransactions(a));
+      return draft.actions.flatMap((a) => resolveActionTransactions(a));
     };
 
     try {
@@ -193,8 +223,13 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
         const { slug: createdCandidateSlug } = await createCandidate({
           targetProposalId: proposalId,
           slug: buildUpdateCandidateSlug(),
-          description: createMarkdownDescription({ title, body }),
-          transactions: actions.flatMap((a) => resolveActionTransactions(a)),
+          description: createMarkdownDescription({
+            title: draft.name,
+            body: draft.body,
+          }),
+          transactions: draft.actions.flatMap((a) =>
+            resolveActionTransactions(a),
+          ),
         });
         const candidateId = [
           connectedAccountAddress,
@@ -223,6 +258,31 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
     }
   };
 
+  React.useEffect(() => {
+    // if the store is not initialized or dialog is being dismissed, ignore
+    // draft creation
+    if (!createDraft || draft != null || hasPendingDismiss) return;
+
+    createDraft({
+      id: draftId,
+      name: persistedTitle,
+      body: persistedRichTextBody,
+      actions: persistedActions,
+      type: "edit",
+    });
+  }, [
+    draftId,
+    draft,
+    createDraft,
+    persistedTitle,
+    persistedRichTextBody,
+    persistedActions,
+    hasPendingDismiss,
+  ]);
+
+  // always have a draft before trying to edit
+  if (!draft) return null;
+
   return (
     <Dialog
       isOpen={isOpen}
@@ -241,12 +301,12 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
         })}
       >
         <ProposalEditor
-          title={title}
-          body={body}
-          actions={actions}
-          setTitle={setTitle}
-          setBody={setBody}
-          setActions={setActions}
+          title={draft.name}
+          body={draft.body}
+          actions={draft.actions}
+          setTitle={setDraftTitle}
+          setBody={setDraftBody}
+          setActions={setDraftActions}
           proposerId={proposal.proposerId}
           onSubmit={() => {
             setShowPreviewDialog(true);
@@ -256,6 +316,7 @@ const ProposalEditDialog = ({ proposalId, isOpen, close: closeDialog }) => {
           containerHeight="calc(100vh - 6rem)"
           scrollContainerRef={scrollContainerRef}
           background={theme.colors.dialogBackground}
+          note="All edits saved to browser storage"
         />
       </div>
 

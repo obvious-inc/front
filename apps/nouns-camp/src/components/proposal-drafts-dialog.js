@@ -25,7 +25,8 @@ const ProposalDraftsDialog = ({ isOpen, close }) => {
 };
 
 const Content = ({ titleProps, dismiss }) => {
-  const { items: proposalDrafts } = useDrafts();
+  const { items: drafts } = useDrafts();
+  const proposalDrafts = drafts.filter((d) => !d.type || d.type === "draft");
 
   const filteredSortedProposalDrafts = React.useMemo(() => {
     if (proposalDrafts == null) return [];
