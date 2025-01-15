@@ -84,6 +84,7 @@ import datesDifferenceInDays from "date-fns/differenceInCalendarDays";
 import NativeSelect from "./native-select.js";
 import { useDialog } from "@/hooks/global-dialogs.js";
 import useScrollToElement from "@/hooks/scroll-to-element.js";
+import useCachedPost from "@/hooks/cached-post.js";
 
 const ActivityFeed = React.lazy(() => import("./activity-feed.js"));
 const ProposalEditDialog = React.lazy(
@@ -184,54 +185,58 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
       ? formActionOverride
       : defaultFormAction;
 
-  const [pendingComment, setPendingComment] = React.useState("");
-  const [pendingSupport, setPendingSupport] = React.useState(() => {
-    if (isFinalOrSucceededState) return 2; // No signal
-    return null;
-  });
-
   const [
-    pendingRepliesByTargetFeedItemId,
-    setPendingRepliesByTargetFeedItemId,
-  ] = React.useState(() => {
-    const initialReplyTargetId = searchParams.get("reply-target");
-    if (initialReplyTargetId == null) return {};
-    return { [initialReplyTargetId]: "" };
-  });
-  const setReply = React.useCallback((targetFeedItemId, reply) => {
-    setPendingRepliesByTargetFeedItemId((s) => ({
-      ...s,
-      [targetFeedItemId]: reply,
-    }));
-  }, []);
-  const [pendingReplyTargetFeedItemIds, setPendingReplyTargetFeedItemIds] =
-    React.useState(() => Object.keys(pendingRepliesByTargetFeedItemId));
-  const [pendingRepostTargetFeedItemIds, setPendingRepostTargetFeedItemIds] =
-    React.useState(() => {
-      const initialRepostTargetId = searchParams.get("repost-target");
-      if (initialRepostTargetId == null) return [];
-      return [initialRepostTargetId];
-    });
+    {
+      comment: pendingComment,
+      support: pendingSupport,
+      replies: pendingReplies,
+      reposts: pendingReposts,
+    },
+    {
+      setComment: setPendingComment,
+      setSupport: setPendingSupport,
+      addReply,
+      setReply,
+      deleteReply,
+      addRepost,
+      deleteRepost,
+      clearPost,
+    },
+  ] = useCachedPost(`vwr:p:${proposalId}`, { searchParams });
+
+  // for finalized props, default to 'no signal' comments
+  React.useEffect(() => {
+    if (isFinalOrSucceededState && pendingComment && pendingSupport === null)
+      setPendingSupport(2);
+  }, [
+    isFinalOrSucceededState,
+    setPendingSupport,
+    pendingComment,
+    pendingSupport,
+  ]);
 
   const replyTargetFeedItems = React.useMemo(() => {
     if (currentFormAction === "farcaster-comment") return [];
+    const pendingReplyTargetFeedItemIds = Object.keys(pendingReplies ?? {});
     return pendingReplyTargetFeedItemIds
       .map((targetFeedItemId) =>
         feedItems.find((i) => i.id === targetFeedItemId),
       )
       .filter(Boolean);
-  }, [currentFormAction, feedItems, pendingReplyTargetFeedItemIds]);
+  }, [currentFormAction, feedItems, pendingReplies]);
 
   const repostTargetFeedItems = React.useMemo(() => {
     if (currentFormAction === "farcaster-comment") return [];
-    return pendingRepostTargetFeedItemIds
+    if (!pendingReposts) return [];
+
+    return pendingReposts
       .map((id) => feedItems.find((i) => i.id === id))
       .filter(Boolean);
-  }, [currentFormAction, feedItems, pendingRepostTargetFeedItemIds]);
+  }, [currentFormAction, feedItems, pendingReposts]);
 
   const reasonWithRepostsAndReplies = React.useMemo(() => {
     const replyMarkedQuotesAndReplyText = replyTargetFeedItems.map((item) => {
-      const replyText = pendingRepliesByTargetFeedItemId[item.id];
+      const replyText = pendingReplies[item.id];
       return formatReply({
         body: replyText,
         target: {
@@ -252,7 +257,7 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
     pendingComment,
     repostTargetFeedItems,
     replyTargetFeedItems,
-    pendingRepliesByTargetFeedItemId,
+    pendingReplies,
   ]);
 
   const sendProposalFeedback = useSendProposalFeedback(proposalId, {
@@ -274,38 +279,9 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
   const [hasPendingQueue, setPendingQueue] = React.useState(false);
   const [hasPendingExecute, setPendingExecute] = React.useState(false);
 
-  const onReply = React.useCallback((postId) => {
-    setPendingReplyTargetFeedItemIds((ids) =>
-      ids.includes(postId) ? ids : [...ids, postId],
-    );
-
-    const input = proposalActionInputRef.current;
-    input.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    input.focus();
-    setTimeout(() => {
-      input.selectionStart = 0;
-      input.selectionEnd = 0;
-    }, 0);
-  }, []);
-
-  const cancelReply = React.useCallback((id) => {
-    setPendingReplyTargetFeedItemIds((ids) => ids.filter((id_) => id_ !== id));
-    proposalActionInputRef.current.focus();
-  }, []);
-
-  const onRepost = React.useCallback(
+  const onReply = React.useCallback(
     (postId) => {
-      setPendingRepostTargetFeedItemIds((ids) =>
-        ids.includes(postId) ? ids : [...ids, postId],
-      );
-
-      const targetPost = feedItems.find((i) => i.id === postId);
-
-      if (targetPost != null)
-        setPendingSupport((support) => {
-          if (support != null) return support;
-          return targetPost.support;
-        });
+      addReply(postId);
 
       const input = proposalActionInputRef.current;
       input.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -315,13 +291,39 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
         input.selectionEnd = 0;
       }, 0);
     },
-    [feedItems],
+    [addReply],
   );
 
-  const cancelRepost = React.useCallback((id) => {
-    setPendingRepostTargetFeedItemIds((ids) => ids.filter((id_) => id_ !== id));
+  const cancelReply = (id) => {
+    deleteReply(id);
     proposalActionInputRef.current.focus();
-  }, []);
+  };
+
+  const onRepost = React.useCallback(
+    (postId) => {
+      const targetPost = feedItems.find((i) => i.id === postId);
+      const targetSupport =
+        pendingSupport === null && targetPost?.support !== undefined
+          ? targetPost.support
+          : undefined;
+
+      addRepost(postId, { support: targetSupport });
+
+      const input = proposalActionInputRef.current;
+      input.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      input.focus();
+      setTimeout(() => {
+        input.selectionStart = 0;
+        input.selectionEnd = 0;
+      }, 0);
+    },
+    [feedItems, pendingSupport, addRepost],
+  );
+
+  const cancelRepost = (id) => {
+    deleteRepost(id);
+    proposalActionInputRef.current.focus();
+  };
 
   useScrollToElement({ id: itemId, enabled: itemId != null });
 
@@ -560,11 +562,7 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
         throw new Error();
     }
 
-    setPendingComment("");
-    setPendingSupport(null);
-    setPendingRepostTargetFeedItemIds([]);
-    setPendingReplyTargetFeedItemIds([]);
-    setPendingRepliesByTargetFeedItemId({});
+    clearPost();
   };
 
   const actionFormProps = {
@@ -583,7 +581,7 @@ const ProposalMainSection = ({ proposalId, scrollContainerRef }) => {
     cancelRepost,
     replyTargetFeedItems,
     repostTargetFeedItems,
-    repliesByTargetFeedItemId: pendingRepliesByTargetFeedItemId,
+    repliesByTargetFeedItemId: pendingReplies,
   };
 
   const activityFeedProps = {

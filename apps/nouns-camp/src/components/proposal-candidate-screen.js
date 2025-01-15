@@ -72,6 +72,7 @@ import TransactionList from "./transaction-list.js";
 import DiffBlock from "./diff-block.js";
 import { useProposalCandidateSimulation } from "../hooks/simulation.js";
 import useScrollToElement from "@/hooks/scroll-to-element.js";
+import useCachedPost from "@/hooks/cached-post.js";
 
 const ActivityFeed = React.lazy(() => import("./activity-feed.js"));
 
@@ -127,9 +128,6 @@ const ProposalCandidateScreenContent = ({
   const [formAction, setFormAction] = React.useState("onchain-comment");
   const availableFormActions = ["onchain-comment", "farcaster-comment"];
 
-  const [pendingComment, setPendingComment] = React.useState("");
-  const [pendingSupport, setPendingSupport] = React.useState(null);
-
   const submitCandidateCast = useSubmitCandidateCast(candidateId);
 
   const [isProposalUpdateDiffDialogOpen, toggleProposalUpdateDiffDialog] =
@@ -157,45 +155,44 @@ const ProposalCandidateScreenContent = ({
   });
 
   const [
-    pendingRepliesByTargetFeedItemId,
-    setPendingRepliesByTargetFeedItemId,
-  ] = React.useState(() => {
-    const initialReplyTargetId = searchParams.get("reply-target");
-    if (initialReplyTargetId == null) return {};
-    return { [initialReplyTargetId]: "" };
-  });
-  const setReply = React.useCallback((targetFeedItemId, reply) => {
-    setPendingRepliesByTargetFeedItemId((s) => ({
-      ...s,
-      [targetFeedItemId]: reply,
-    }));
-  }, []);
-  const [pendingReplyTargetFeedItemIds, setPendingReplyTargetFeedItemIds] =
-    React.useState(() => Object.keys(pendingRepliesByTargetFeedItemId));
-  const [pendingRepostTargetFeedItemIds, setPendingRepostTargetFeedItemIds] =
-    React.useState(() => {
-      const initialRepostTargetId = searchParams.get("repost-target");
-      if (initialRepostTargetId == null) return [];
-      return [initialRepostTargetId];
-    });
+    {
+      comment: pendingComment,
+      support: pendingSupport,
+      replies: pendingReplies,
+      reposts: pendingReposts,
+    },
+    {
+      setComment: setPendingComment,
+      setSupport: setPendingSupport,
+      addReply,
+      setReply,
+      deleteReply,
+      addRepost,
+      deleteRepost,
+      clearPost,
+    },
+  ] = useCachedPost(`vwr:c:${candidateId}`, { searchParams });
 
   const replyTargetFeedItems = React.useMemo(() => {
     if (formAction === "farcaster-comment") return [];
+    const pendingReplyTargetFeedItemIds = Object.keys(pendingReplies ?? {});
     return pendingReplyTargetFeedItemIds.map((targetFeedItemId) =>
       feedItems.find((i) => i.id === targetFeedItemId),
     );
-  }, [formAction, feedItems, pendingReplyTargetFeedItemIds]);
+  }, [formAction, feedItems, pendingReplies]);
 
   const repostTargetFeedItems = React.useMemo(() => {
     if (formAction === "farcaster-comment") return [];
-    return pendingRepostTargetFeedItemIds
+    if (!pendingReposts) return [];
+
+    return pendingReposts
       .map((id) => feedItems.find((i) => i.id === id))
       .filter(Boolean);
-  }, [formAction, feedItems, pendingRepostTargetFeedItemIds]);
+  }, [formAction, feedItems, pendingReposts]);
 
   const reasonWithRepostsAndReplies = React.useMemo(() => {
     const replyMarkedQuotesAndReplyText = replyTargetFeedItems.map((item) => {
-      const replyText = pendingRepliesByTargetFeedItemId[item.id];
+      const replyText = pendingReplies[item.id];
       return formatReply({
         body: replyText,
         target: {
@@ -216,7 +213,7 @@ const ProposalCandidateScreenContent = ({
     pendingComment,
     repostTargetFeedItems,
     replyTargetFeedItems,
-    pendingRepliesByTargetFeedItemId,
+    pendingReplies,
   ]);
 
   const sendCandidateFeedback = useSendProposalCandidateFeedback(
@@ -235,38 +232,9 @@ const ProposalCandidateScreenContent = ({
 
   const sponsorsVotingPower = useSponsorsVotingPower(candidateId);
 
-  const onReply = React.useCallback((postId) => {
-    setPendingReplyTargetFeedItemIds((ids) =>
-      ids.includes(postId) ? ids : [...ids, postId],
-    );
-
-    const input = actionFormInputRef.current;
-    input.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    input.focus();
-    setTimeout(() => {
-      input.selectionStart = 0;
-      input.selectionEnd = 0;
-    }, 0);
-  }, []);
-
-  const cancelReply = React.useCallback((id) => {
-    setPendingReplyTargetFeedItemIds((ids) => ids.filter((id_) => id_ !== id));
-    actionFormInputRef.current.focus();
-  }, []);
-
-  const onRepost = React.useCallback(
+  const onReply = React.useCallback(
     (postId) => {
-      setPendingRepostTargetFeedItemIds((ids) =>
-        ids.includes(postId) ? ids : [...ids, postId],
-      );
-
-      const targetPost = feedItems.find((i) => i.id === postId);
-
-      if (targetPost != null)
-        setPendingSupport((support) => {
-          if (support != null) return support;
-          return targetPost.support;
-        });
+      addReply(postId, "");
 
       const input = actionFormInputRef.current;
       input.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -276,13 +244,42 @@ const ProposalCandidateScreenContent = ({
         input.selectionEnd = 0;
       }, 0);
     },
-    [feedItems],
+    [addReply],
   );
 
-  const cancelRepost = React.useCallback((id) => {
-    setPendingRepostTargetFeedItemIds((ids) => ids.filter((id_) => id_ !== id));
+  const cancelReply = (id) => {
+    deleteReply(id);
     actionFormInputRef.current.focus();
-  }, []);
+  };
+
+  const onRepost = React.useCallback(
+    (postId) => {
+      const targetPost = feedItems.find((i) => i.id === postId);
+      const targetSupport =
+        !pendingSupport && targetPost?.support !== undefined
+          ? targetPost.support
+          : undefined;
+
+      addRepost(postId, { support: targetSupport });
+
+      const input = actionFormInputRef.current;
+      input.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      input.focus();
+      setTimeout(() => {
+        input.selectionStart = 0;
+        input.selectionEnd = 0;
+      }, 0);
+    },
+    [feedItems, pendingSupport, addRepost],
+  );
+
+  const cancelRepost = React.useCallback(
+    (id) => {
+      deleteRepost(id);
+      actionFormInputRef.current.focus();
+    },
+    [deleteRepost],
+  );
 
   if (candidate?.latestVersion.content.description == null) return null;
 
@@ -348,8 +345,7 @@ const ProposalCandidateScreenContent = ({
         throw new Error();
     }
 
-    setPendingComment("");
-    setPendingSupport(null);
+    clearPost();
   };
 
   const actionFormProps = {
@@ -367,7 +363,7 @@ const ProposalCandidateScreenContent = ({
     cancelRepost,
     replyTargetFeedItems,
     repostTargetFeedItems,
-    repliesByTargetFeedItemId: pendingRepliesByTargetFeedItemId,
+    repliesByTargetFeedItemId: pendingReplies,
   };
 
   const activityFeedProps = {
